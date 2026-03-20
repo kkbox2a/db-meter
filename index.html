@@ -7,7 +7,6 @@
     
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#0f172a">
-    
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="分貝計">
@@ -19,12 +18,18 @@
             font-family: -apple-system, sans-serif; 
             display: flex; flex-direction: column; align-items: center; 
             background: #0f172a; color: white; margin: 0; padding: 20px;
-            /* 防止 iOS 橡皮筋滾動效果 */
             overscroll-behavior-y: none; 
         }
-        .container { text-align: center; width: 100%; max-width: 500px; margin-top: 20px; }
+        .container { text-align: center; width: 100%; max-width: 500px; margin-top: 10px; }
         #db-display { font-size: 5rem; font-weight: 800; margin: 10px 0; color: #00ffcc; transition: color 0.3s; }
-        .stats { display: flex; justify-content: space-around; margin-bottom: 20px; color: #94a3b8; }
+        .stats { display: flex; justify-content: space-around; margin-bottom: 15px; color: #94a3b8; align-items: center; }
+        
+        /* 下拉選單樣式 */
+        .speed-control { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; }
+        select { 
+            padding: 6px 12px; border-radius: 8px; background: #334155; 
+            color: white; border: 1px solid #475569; outline: none; cursor: pointer;
+        }
         
         .chart-container { 
             position: relative; height: 220px; width: 100%; 
@@ -49,9 +54,20 @@
     <div class="container">
         <h2>環境分貝趨勢</h2>
         <div id="db-display">0</div>
+        
         <div class="stats">
             <span id="peak-display">最高: 0 dB</span>
+            <div class="speed-control">
+                <label for="speed-select">速度:</label>
+                <select id="speed-select">
+                    <option value="50">極快 (0.05秒)</option>
+                    <option value="150" selected>標準 (0.15秒)</option>
+                    <option value="500">平穩 (0.5秒)</option>
+                    <option value="1000">省電 (1秒)</option>
+                </select>
+            </div>
         </div>
+
         <div class="chart-container">
             <canvas id="historyChart"></canvas>
         </div>
@@ -63,12 +79,9 @@
     </div>
 
     <script>
-        // 註冊 PWA Service Worker
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('./sw.js')
-                    .then(reg => console.log('Service Worker 註冊成功！', reg))
-                    .catch(err => console.log('Service Worker 註冊失敗：', err));
+                navigator.serviceWorker.register('./sw.js').catch(err => console.log(err));
             });
         }
 
@@ -77,6 +90,7 @@
         const resetBtn = document.getElementById('reset-btn');
         const dbDisplay = document.getElementById('db-display');
         const peakDisplay = document.getElementById('peak-display');
+        const speedSelect = document.getElementById('speed-select'); // 取得選單元素
         const ctx = document.getElementById('historyChart').getContext('2d');
 
         let maxDb = 0;
@@ -86,6 +100,8 @@
         let audioContext;
         let stream;
         let monitorInterval;
+        let analyser;
+        let dataArray;
 
         function initChart() {
             if (historyChart) historyChart.destroy();
@@ -94,10 +110,8 @@
                 data: {
                     labels: labels,
                     datasets: [{
-                        label: '分貝值',
-                        data: [...dbHistory],
-                        borderColor: '#00ffcc',
-                        backgroundColor: 'rgba(0, 255, 204, 0.1)',
+                        label: '分貝值', data: [...dbHistory],
+                        borderColor: '#00ffcc', backgroundColor: 'rgba(0, 255, 204, 0.1)',
                         borderWidth: 2, fill: true, tension: 0.3, pointRadius: 0
                     }]
                 },
@@ -111,6 +125,40 @@
 
         initChart();
 
+        // 將偵測邏輯獨立成一個函式，方便隨時切換速度
+        function startLoop() {
+            // 如果已經有計時器在跑，先把它清除掉
+            if (monitorInterval) clearInterval(monitorInterval);
+            
+            // 讀取目前下拉選單設定的毫秒數
+            const currentSpeed = parseInt(speedSelect.value);
+
+            // 啟動新的計時器
+            monitorInterval = setInterval(() => {
+                if(!analyser) return;
+                analyser.getByteFrequencyData(dataArray);
+                let sum = 0;
+                for(let i = 0; i < dataArray.length; i++) { sum += dataArray[i]; }
+                let average = sum / dataArray.length;
+                let currentDb = Math.round((average * 0.4) + 35);
+
+                if (currentDb > maxDb) { maxDb = currentDb; peakDisplay.innerText = `最高: ${maxDb} dB`; }
+                dbDisplay.innerText = currentDb;
+                dbDisplay.style.color = currentDb > 80 ? '#ff4757' : '#00ffcc';
+
+                dbHistory.push(currentDb); dbHistory.shift();
+                historyChart.data.datasets[0].data = [...dbHistory]; historyChart.update();
+            }, currentSpeed);
+        }
+
+        // 監聽下拉選單的變更事件
+        speedSelect.addEventListener('change', () => {
+            // 如果目前正在偵測中 (stopBtn 有顯示)，才需要立刻套用新速度重新跑
+            if (stopBtn.style.display === 'inline-block') {
+                startLoop();
+            }
+        });
+
         resetBtn.onclick = () => {
             maxDb = 0; peakDisplay.innerText = "最高: 0 dB"; dbHistory.fill(0);
             historyChart.data.datasets[0].data = [...dbHistory]; historyChart.update();
@@ -122,6 +170,7 @@
             if (audioContext) audioContext.close();
             startBtn.style.display = 'inline-block'; stopBtn.style.display = 'none';
             dbDisplay.innerText = "已停止"; dbDisplay.style.color = "#94a3b8";
+            analyser = null; // 清除分析器
         };
 
         startBtn.onclick = async () => {
@@ -129,27 +178,16 @@
                 stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const source = audioContext.createMediaStreamSource(stream);
-                const analyser = audioContext.createAnalyser();
+                analyser = audioContext.createAnalyser();
                 analyser.fftSize = 256;
                 source.connect(analyser);
 
                 startBtn.style.display = 'none'; stopBtn.style.display = 'inline-block';
-                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-                monitorInterval = setInterval(() => {
-                    analyser.getByteFrequencyData(dataArray);
-                    let sum = 0;
-                    for(let i = 0; i < dataArray.length; i++) { sum += dataArray[i]; }
-                    let average = sum / dataArray.length;
-                    let currentDb = Math.round((average * 0.4) + 35);
+                // 呼叫我們剛才寫好的獨立函式開始偵測
+                startLoop();
 
-                    if (currentDb > maxDb) { maxDb = currentDb; peakDisplay.innerText = `最高: ${maxDb} dB`; }
-                    dbDisplay.innerText = currentDb;
-                    dbDisplay.style.color = currentDb > 80 ? '#ff4757' : '#00ffcc';
-
-                    dbHistory.push(currentDb); dbHistory.shift();
-                    historyChart.data.datasets[0].data = [...dbHistory]; historyChart.update();
-                }, 150);
             } catch (err) {
                 alert("啟動失敗：請確認已允許麥克風權限。");
             }
