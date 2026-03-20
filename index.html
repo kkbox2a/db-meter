@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>專業分貝監測儀</title>
+    
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#0f172a">
+    
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="分貝計">
+    <link rel="apple-touch-icon" href="icon-192.png">
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { 
+            font-family: -apple-system, sans-serif; 
+            display: flex; flex-direction: column; align-items: center; 
+            background: #0f172a; color: white; margin: 0; padding: 20px;
+            /* 防止 iOS 橡皮筋滾動效果 */
+            overscroll-behavior-y: none; 
+        }
+        .container { text-align: center; width: 100%; max-width: 500px; margin-top: 20px; }
+        #db-display { font-size: 5rem; font-weight: 800; margin: 10px 0; color: #00ffcc; transition: color 0.3s; }
+        .stats { display: flex; justify-content: space-around; margin-bottom: 20px; color: #94a3b8; }
+        
+        .chart-container { 
+            position: relative; height: 220px; width: 100%; 
+            background: rgba(30, 41, 59, 0.5); border-radius: 12px; padding: 10px; box-sizing: border-box;
+        }
+        
+        .controls { margin-top: 20px; }
+        button { 
+            padding: 12px 30px; font-size: 1.1rem; cursor: pointer; 
+            border: none; border-radius: 50px; font-weight: bold; margin: 5px;
+            transition: transform 0.1s;
+        }
+        button:active { transform: scale(0.95); }
+        
+        #start-btn { background: #38bdf8; color: #fff; }
+        #stop-btn { background: #f59e0b; color: #fff; display: none; }
+        #reset-btn { background: transparent; border: 1px solid #ef4444; color: #ef4444; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h2>環境分貝趨勢</h2>
+        <div id="db-display">0</div>
+        <div class="stats">
+            <span id="peak-display">最高: 0 dB</span>
+        </div>
+        <div class="chart-container">
+            <canvas id="historyChart"></canvas>
+        </div>
+        <div class="controls">
+            <button id="start-btn">開始監測</button>
+            <button id="stop-btn">停止監測</button>
+            <button id="reset-btn">清除</button>
+        </div>
+    </div>
+
+    <script>
+        // 註冊 PWA Service Worker
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js')
+                    .then(reg => console.log('Service Worker 註冊成功！', reg))
+                    .catch(err => console.log('Service Worker 註冊失敗：', err));
+            });
+        }
+
+        const startBtn = document.getElementById('start-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const resetBtn = document.getElementById('reset-btn');
+        const dbDisplay = document.getElementById('db-display');
+        const peakDisplay = document.getElementById('peak-display');
+        const ctx = document.getElementById('historyChart').getContext('2d');
+
+        let maxDb = 0;
+        let dbHistory = new Array(40).fill(0); 
+        let labels = new Array(40).fill(''); 
+        let historyChart;
+        let audioContext;
+        let stream;
+        let monitorInterval;
+
+        function initChart() {
+            if (historyChart) historyChart.destroy();
+            historyChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: '分貝值',
+                        data: [...dbHistory],
+                        borderColor: '#00ffcc',
+                        backgroundColor: 'rgba(0, 255, 204, 0.1)',
+                        borderWidth: 2, fill: true, tension: 0.3, pointRadius: 0
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    scales: { y: { min: 20, max: 100, grid: { color: '#334155' }, ticks: { color: '#94a3b8' } }, x: { display: false } },
+                    plugins: { legend: { display: false } }, animation: false
+                }
+            });
+        }
+
+        initChart();
+
+        resetBtn.onclick = () => {
+            maxDb = 0; peakDisplay.innerText = "最高: 0 dB"; dbHistory.fill(0);
+            historyChart.data.datasets[0].data = [...dbHistory]; historyChart.update();
+        };
+
+        stopBtn.onclick = () => {
+            clearInterval(monitorInterval);
+            if (stream) stream.getTracks().forEach(track => track.stop());
+            if (audioContext) audioContext.close();
+            startBtn.style.display = 'inline-block'; stopBtn.style.display = 'none';
+            dbDisplay.innerText = "已停止"; dbDisplay.style.color = "#94a3b8";
+        };
+
+        startBtn.onclick = async () => {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                const analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+
+                startBtn.style.display = 'none'; stopBtn.style.display = 'inline-block';
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+                monitorInterval = setInterval(() => {
+                    analyser.getByteFrequencyData(dataArray);
+                    let sum = 0;
+                    for(let i = 0; i < dataArray.length; i++) { sum += dataArray[i]; }
+                    let average = sum / dataArray.length;
+                    let currentDb = Math.round((average * 0.4) + 35);
+
+                    if (currentDb > maxDb) { maxDb = currentDb; peakDisplay.innerText = `最高: ${maxDb} dB`; }
+                    dbDisplay.innerText = currentDb;
+                    dbDisplay.style.color = currentDb > 80 ? '#ff4757' : '#00ffcc';
+
+                    dbHistory.push(currentDb); dbHistory.shift();
+                    historyChart.data.datasets[0].data = [...dbHistory]; historyChart.update();
+                }, 150);
+            } catch (err) {
+                alert("啟動失敗：請確認已允許麥克風權限。");
+            }
+        };
+    </script>
+</body>
+</html>
